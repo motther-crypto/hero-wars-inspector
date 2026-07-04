@@ -4,7 +4,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      0.1
 // @description  Hero Wars stats inspector (English, Russian)
-// @description:ru Хроники Хаоса Инспектор статов (Английский, Русский)
+// @description:ru Хроники Хаоса Инспектов статов
 // @author       Messmer
 // @match        *://*.hero-wars-alliance.com/*
 // @match        *://hero-wars-alliance.com/*
@@ -48,9 +48,56 @@
     let LANG = localStorage.getItem('hw_inspector_lang') || 
                ((navigator.language && navigator.language.startsWith('ru')) ? 'ru' : 'en');
  
+    // Кэш последнего ответа от сервера игры для динамического перевода
+    let lastGameResponse = null;
+ 
     const i18n = {
-        en: { title: "⚔️ INSPECTOR", wait: "Waiting for battle...", copy: "📋 Copy", copied: "✅ Copied", power: "pwr", runes: "Glyphs", art: "Arts", tal: "Talisman", calc: "Calculator (+/-):", dmgVs: "Dmg vs Enemy:" },
-        ru: { title: "⚔️ ИНСПЕКТОР", wait: "Ожидание боя...", copy: "📋 Копировать", copied: "✅ Скопировано", power: "мощь", runes: "Символы", art: "Арты", tal: "Талисман", calc: "Калькулятор (+/-):", dmgVs: "Урон по врагу:" }
+        en: { 
+            title: "⚔️ INSPECTOR", 
+            wait: "Waiting for battle...", 
+            copy: "📋 Copy", 
+            copied: "✅ Copied", 
+            power: "pwr", 
+            runes: "Glyphs", 
+            art: "Arts", 
+            tal: "Talisman", 
+            calc: "Calculator (+/-):", 
+            dmgVs: "Dmg vs Enemy:",
+            defenders: "DEFENDERS",
+            attackers: "ATTACKERS",
+            training: "TRAINING",
+            enemy: "ENEMY",
+            ally: "ALLY",
+            selfAr: "Self Armor",
+            selfMr: "Self MR",
+            selfAp: "Self ArPen",
+            selfMp: "Self MgPen",
+            enemyAr: "Enemy Armor Cut",
+            enemyMr: "Enemy MR Cut"
+        },
+        ru: { 
+            title: "⚔️ ИНСПЕКТОР", 
+            wait: "Ожидание боя...", 
+            copy: "📋 Копировать", 
+            copied: "✅ Скопировано", 
+            power: "мощь", 
+            runes: "Символы", 
+            art: "Арты", 
+            tal: "Талисман", 
+            calc: "Калькулятор (+/-):", 
+            dmgVs: "Урон по врагу:",
+            defenders: "ЗАЩИТНИКИ",
+            attackers: "АТАКУЮЩИЕ",
+            training: "ТРЕНИРОВКА",
+            enemy: "ВРАГ",
+            ally: "СОЮЗНИК",
+            selfAr: "Своя Броня",
+            selfMr: "Свой Маг.Резист",
+            selfAp: "Свое Пробитие Брони",
+            selfMp: "Свое Пробитие Магии",
+            enemyAr: "Срез Брони Врага",
+            enemyMr: "Срез Маг.Резиста Врага"
+        }
     };
     const t = (k) => i18n[LANG][k] || k;
  
@@ -105,7 +152,7 @@
  
     let isCollapsed = false;
  
-    // Отрисовка интерактивной шапки с переключателем языка
+    // Отрисовка интерактивной шапки с переключателем языка и автообновлением UI
     const drawHeader = () => {
         header.innerHTML = '';
         const titleSpan = document.createElement('span');
@@ -124,7 +171,10 @@
             LANG = LANG === 'en' ? 'ru' : 'en';
             localStorage.setItem('hw_inspector_lang', LANG);
             drawHeader();
-            if (content.innerText === i18n.en.wait || content.innerText === i18n.ru.wait) {
+            if (lastGameResponse) {
+                // Если на экране есть данные — мгновенно перерисовываем всю панель на новом языке
+                handleResp(lastGameResponse);
+            } else {
                 content.innerText = t('wait');
             }
         };
@@ -148,7 +198,7 @@
     panel.appendChild(header);
     panel.appendChild(content);
  
-    // Логика перемещения (Drag and Drop) панели
+    // Логика перемещения панели
     let isDrag = false, ox = 0, oy = 0;
     header.onmousedown = (e) => { 
         if(e.target.tagName === 'SPAN') return; 
@@ -195,6 +245,7 @@
         return Math.max(...team.map(h => Math.max(h.strength||0, h.agility||0, h.intelligence||0))) || 10000;
     };
  
+    // Точный расчет характеристик с восстановлением из первичных параметров
     const getHeroStats = (h, refStat, bArmor=0, bMR=0, bAP=0, bMP=0) => {
         let isT = h.id >= 4000 && h.id <= 4099;
         if (isT) {
@@ -204,14 +255,55 @@
                 pa: h.physicalAttack || 0,
                 ar: Math.max(0, (h.armor || 0) + bArmor),
                 mr: Math.max(0, (h.magicResist || 0) + bMR),
-                ap: bAP, mpen: bMP, str: 0, agi: 0, int: 0, mp: 0
+                ap: bAP, mpen: bMP, str: 0, agi: 0, int: 0, mp: 0,
+                dodge: 0
             };
         }
-        let str = h.strength||0, agi = h.agility||0, int = h.intelligence||0;
-        let hp = h.hp||0, ar = Math.max(0, (h.armor||0) + bArmor), mr = Math.max(0, (h.magicResist||0) + bMR), mp = h.magicPower||0;
-        let pa = h.physicalAttack||0;
-        let ap = Math.max(0, (h.crush||h.armorPenetration||0) + bAP), mpen = Math.max(0, (h.magicPenetration||0) + bMP);
-        return { isTitan: false, str, agi, int, hp, ar, mr, pa, mp, ap, mpen };
+        
+        let str = h.strength || 0;
+        let agi = h.agility || 0;
+        let int = h.intelligence || 0;
+ 
+        // 1. Восстанавливаем РЕАЛЬНЫЕ базовые статы до боя (сервер в пакетах присылает их БЕЗ учета Силы/Ловкости/Интеллекта)
+        let hp = (h.hp || 0) + str * 40;
+        let ar = (h.armor || 0) + agi;
+        let mr = (h.magicResist || 0) + int;
+        let mp = (h.magicPower || 0) + int * 3;
+        let dodge = h.dodge || 0;
+ 
+        // Рассчитываем физическую атаку с учетом основного параметра
+        let mainStat = 'str';
+        if (agi > str && agi > int) mainStat = 'agi';
+        else if (int > str && int > agi) mainStat = 'int';
+ 
+        let pa = h.physicalAttack || 0;
+        pa += agi * 2;
+        if (mainStat === 'str') pa += str;
+        else if (mainStat === 'agi') pa += agi;
+        else if (mainStat === 'int') pa += int;
+ 
+        // 2. ИНТЕГРАЦИЯ ПАССИВКИ ЭЛЕКТРЫ "БЕССМЕРТНЫЙ ПАНЦИРЬ" (ID: 71)
+        if (h.id === 71) {
+            let D = ar + mr + dodge; // Сумма базовой защиты
+            
+            // Формула: увеличивает здоровье на (10% Health + 12000) за каждые 1000 очков защиты
+            let hpBonus = (D / 1000) * (0.1 * hp + 12000);
+            hp += hpBonus;
+            
+            // В бою защита зануляется навсегда и не баффается
+            ar = 0;
+            mr = 0;
+            dodge = 0;
+        } else {
+            // Для обычных героев прибавляем модификаторы калькулятора боя
+            ar = Math.max(0, ar + bArmor);
+            mr = Math.max(0, mr + bMR);
+        }
+ 
+        let ap = Math.max(0, (h.crush || h.armorPenetration || 0) + bAP);
+        let mpen = Math.max(0, (h.magicPenetration || 0) + bMP);
+ 
+        return { isTitan: false, str, agi, int, hp, ar, mr, pa, mp, ap, mpen, dodge };
     };
  
     const copyStats = (team, label, oppTeam=[]) => {
@@ -336,15 +428,15 @@
  
                             let crit = h.physicalCritChance || h.magicCritChance;
                             if (crit) html += `Crit: <span style="color:#f55">${crit}</span> (+${p(crit)})<br>`;
-                            if (h.dodge) html += `Dodge: <span style="color:#55f">${h.dodge}</span> (+${p(h.dodge)})<br>`;
+                            if (s.dodge > 0) html += `Dodge: <span style="color:#55f">${s.dodge}</span> (+${p(s.dodge)})<br>`;
                         }
  
                         let runes = Array.isArray(h.hero_runes) ? h.hero_runes : Object.values(h.hero_runes||{});
-                        if (runes.length) html += `Glyphs: <span style="color:#aaa">[${runes.join(', ')}]</span><br>`;
+                        if (runes.length) html += `${t('runes')}: <span style="color:#aaa">[${runes.join(', ')}]</span><br>`;
                         if (h.artifacts && h.artifacts.length) {
-                            html += `Arts: <span style="color:#8af">${h.artifacts.map((a,i)=>`${['🗡️','📖','💍'][i]}${a.level}(${a.star}★)`).join(' ')}</span><br>`;
+                            html += `${t('art')}: <span style="color:#8af">${h.artifacts.map((a,i)=>`${['🗡️','📖','💍'][i]}${a.level}(${a.star}★)`).join(' ')}</span><br>`;
                         }
-                        if (h.talisman) html += `Talisman: <span style="color:#d8f">Lvl ${h.talisman.level}</span><br>`;
+                        if (h.talisman) html += `${t('tal')}: <span style="color:#d8f">Lvl ${h.talisman.level}</span><br>`;
  
                         if (opp.length && !s.isTitan) {
                             html += `<hr style="border-top:1px solid #223;margin:6px 0"><span style="color:#0f0"><b>${t('dmgVs')}</b></span><br>`;
@@ -380,7 +472,7 @@
                         
                         i.oninput = (e) => cb(Number(e.target.value)||0);
  
-                        // КРИТИЧЕСКИЙ ФИКС БАГА КЛАВИАТУРЫ: предотвращаем перехват ввода игровым окном Canvas
+                        // Остановка клавиатурных событий (игра больше не будет воровать ввод)
                         const stopEvents = (e) => e.stopPropagation();
                         i.addEventListener('keydown', stopEvents);
                         i.addEventListener('keyup', stopEvents);
@@ -391,12 +483,12 @@
                     };
  
                     sbC.innerHTML = `<hr style="border-top:1px solid #223;margin:6px 0"><span style="color:#0f0"><b>${t('calc')}</b></span><br>`;
-                    sbC.appendChild(mkInp('Self Armor', v=>{ba=v;upd()}));
-                    sbC.appendChild(mkInp('Self MR', v=>{bmr=v;upd()}));
-                    sbC.appendChild(mkInp('Self ArPen', v=>{bap=v;upd()}));
-                    sbC.appendChild(mkInp('Self MgPen', v=>{bmp=v;upd()}));
-                    sbC.appendChild(mkInp('Enemy Armor Cut', v=>{ca=v;upd()}));
-                    sbC.appendChild(mkInp('Enemy MR Cut', v=>{cmr=v;upd()}));
+                    sbC.appendChild(mkInp(t('selfAr'), v=>{ba=v;upd()}));
+                    sbC.appendChild(mkInp(t('selfMr'), v=>{bmr=v;upd()}));
+                    sbC.appendChild(mkInp(t('selfAp'), v=>{bap=v;upd()}));
+                    sbC.appendChild(mkInp(t('selfMp'), v=>{bmp=v;upd()}));
+                    sbC.appendChild(mkInp(t('enemyAr'), v=>{ca=v;upd()}));
+                    sbC.appendChild(mkInp(t('enemyMr'), v=>{cmr=v;upd()}));
  
                     upd();
                     row.parentNode.insertBefore(det, row.nextSibling);
@@ -405,7 +497,34 @@
         });
     }
  
+    // Хелпер: проверяет, несет ли пакет действительно важную игровую (боевую) информацию
+    function hasRelevantData(data) {
+        if (!data || !Array.isArray(data.results)) return false;
+        for (let item of data.results) {
+            let resp = item.result?.response;
+            if (!resp || typeof resp !== 'object') continue;
+            if (resp.draft || resp.draftEnemy) continue;
+            
+            if (resp.challenges && Array.isArray(resp.challenges)) return true;
+            if (resp.enemies && Array.isArray(resp.enemies)) return true;
+            
+            let wi = resp.warInfo || resp;
+            if (wi.enemySlots || wi.ourSlots) return true;
+            
+            if (getBattle(resp)) return true;
+        }
+        return false;
+    }
+ 
     function handleResp(data) {
+        // Если прилетел пустой пакет или фоновый запрос (чат, квесты), не сбрасываем текущий экран инспектора!
+        if (!hasRelevantData(data)) {
+            return; 
+        }
+ 
+        lastGameResponse = data; // Сохраняем только валидный боевой пакет
+        content.innerHTML = ''; 
+ 
         for (let item of data.results || []) {
             let resp = item.result?.response;
             if (!resp || typeof resp !== 'object') continue;
@@ -413,33 +532,33 @@
             if (resp.draft || resp.draftEnemy) continue;
  
             if (resp.challenges && Array.isArray(resp.challenges)) {
-                content.innerHTML = '';
                 resp.challenges.forEach(c => {
                     if (c.data && c.data.defenders) {
                         let type = c.data.type === 'titan' ? 'TITANS' : 'HEROES';
                         let power = c.data.defenders.power ? `(${c.data.defenders.power.toLocaleString()} pwr)` : '';
-                        render(c.data.defenders, `TRAINING: [${type}] ${power}`, '#ffb000');
+                        render(c.data.defenders, `${t('training')}: [${type}] ${power}`, '#ffb000');
                     }
                 });
                 return;
             }
  
             if (resp.enemies && Array.isArray(resp.enemies)) {
-                content.innerHTML = '';
                 resp.enemies.forEach(e => {
-                    render(e.heroes, `ENEMY: ${e.user?.name||'Player'}`, '#f55');
+                    render(e.heroes, `${t('enemy')}: ${e.user?.name||'Player'}`, '#f55');
                 });
                 return;
             }
  
             let wi = resp.warInfo || resp;
             if (wi.enemySlots || wi.ourSlots) {
-                content.innerHTML = '';
                 ['enemySlots', 'ourSlots'].forEach(k => {
                     if (!wi[k]) return;
                     Object.keys(wi[k]).forEach(id => {
                         let s = wi[k][id];
-                        if (s && s.team) render(s.team, `${k==='enemySlots'?'ENEMY':'ALLY'} [${id}]`, k==='enemySlots'?'#f55':'#00d0ff');
+                        if (s && s.team) {
+                            let slotLabel = k === 'enemySlots' ? t('enemy') : t('ally');
+                            render(s.team, `${slotLabel} [${id}]`, k === 'enemySlots' ? '#f55' : '#00d0ff');
+                        }
                     });
                 });
                 return;
@@ -447,10 +566,9 @@
  
             let b = getBattle(resp);
             if (b) {
-                content.innerHTML = '';
                 let att = parseTeam(b.attackers)[0] || [], def = parseTeam(b.defenders)[0] || [];
-                render(b.defenders, 'DEFENDERS', '#f55', att);
-                render(b.attackers, 'ATTACKERS', '#00d0ff', def);
+                render(b.defenders, t('defenders'), '#f55', att);
+                render(b.attackers, t('attackers'), '#00d0ff', def);
                 return;
             }
         }

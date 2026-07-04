@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      5.1
 // @description  Hero Wars stats inspector (English, Collapsible, No Pets, Titans & Dungeon Support)
-// @author       Content Creator
+// @author       Messmer
 // @match        *://*.hero-wars-alliance.com/*
 // @match        *://hero-wars-alliance.com/*
 // @match        *://*.nextersglobal.com/*
